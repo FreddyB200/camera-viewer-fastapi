@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Camera Viewer</title>
+    <style>
+        body { background-color: #1a1a1a; margin: 0; font-family: sans-serif; color: #ccc; }
+        #grid-container {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            height: 100vh;
+            gap: 5px;
+            padding: 5px;
+            box-sizing: border-box;
+        }
+        .grid-item { 
+            background-color: #000; 
+            position: relative; 
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+        .overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: rgba(0,0,0,0.7);
+            font-size: 1.2em;
+            text-align: center;
+            padding: 10px;
+            transition: opacity 0.3s ease;
+        }
+        .overlay.hidden { display: none; }
+        .cam-title {
+            position: absolute; top: 5px; left: 5px;
+            color: white; background-color: rgba(0,0,0,0.6);
+            padding: 2px 8px; border-radius: 3px; font-size: 14px;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+</head>
+<body>
+    <div id="grid-container"></div>
+
+    <script>
+        const grid = document.getElementById('grid-container');
+        const totalCameras = 16;
+
+        for (let i = 1; i <= totalCameras; i++) {
+            const item = document.createElement('div');
+            item.className = 'grid-item';
+            
+            const video = document.createElement('video');
+            video.id = `cam${i}`;
+            video.muted = true;
+            video.autoplay = true;
+
+            const title = document.createElement('div');
+            title.className = 'cam-title';
+            title.innerText = `Camera ${i}`;
+
+            const loadingOverlay = document.createElement('div');
+            loadingOverlay.className = 'overlay loading';
+            loadingOverlay.innerText = 'Connecting Stream...';
+
+            const errorOverlay = document.createElement('div');
+            errorOverlay.className = 'overlay error hidden';
+            errorOverlay.innerText = 'Stream Offline\n(Check Logs)';
+            
+            item.appendChild(video);
+            item.appendChild(title);
+            item.appendChild(loadingOverlay);
+            item.appendChild(errorOverlay);
+            grid.appendChild(item);
+
+            const hlsUrl = `/hls/cam${i}/stream.m3u8`;
+
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(hlsUrl);
+                hls.attachMedia(video);
+                
+                hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                    loadingOverlay.classList.add('hidden');
+                });
+                hls.on(Hls.Events.ERROR, function(event, data) {
+                    if (data.fatal) {
+                        loadingOverlay.classList.add('hidden');
+                        errorOverlay.classList.remove('hidden');
+                    }
+                });
+
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = hlsUrl;
+                video.addEventListener('loadedmetadata', function() {
+                     loadingOverlay.classList.add('hidden');
+                });
+            }
+        }
+    </script>
+</body>
+</html>
