@@ -1,0 +1,17 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Generated HLS stream files
+hls/
+
+# Environment variables
+# DO NOT ADD THIS FILE TO GIT!
+.env
+
+# OS / Editor specific
+.DS_Store
+.vscode/
