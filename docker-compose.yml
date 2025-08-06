@@ -1,0 +1,19 @@
+# Use a modern version of Docker Compose
+version: '3.8'
+
+# Define the services (containers) for the application
+services:
+  # Define our camera viewer service
+  camera-viewer:
+    # Build the Docker image from the Dockerfile in the current directory (.)
+    build: .
+    # Give the running container a friendly name
+    container_name: visor-camaras-container
+    # Map port 8000 on the host machine to port 8000 in the container
+    ports:
+      - "8000:8000"
+    # This is the key part: load environment variables from the .env file
+    env_file:
+      - ./.env
+    # Automatically restart the container unless it was explicitly stopped
+    restart: unless-stopped
