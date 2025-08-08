@@ -3,81 +3,96 @@ import subprocess
 import logging
 import time
 import shutil
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+import threading
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.staticfiles import StaticFiles
 from settings import settings
 
-# --- Setup professional logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- A function to check if FFmpeg is installed ---
+app = FastAPI()
+ffmpeg_processes = {}
+HLS_BASE_DIR = "hls"
+STALE_THRESHOLD_SECONDS = 30
+
 def check_ffmpeg():
     if not shutil.which("ffmpeg"):
-        logging.error("CRITICAL: ffmpeg command not found. Please ensure FFmpeg is installed in the Docker container.")
+        logging.error("CRITICAL: ffmpeg command not found.")
         raise RuntimeError("FFmpeg not found")
     logging.info("FFmpeg installation confirmed.")
 
-# --- Main Application Setup ---
-app = FastAPI()
-ffmpeg_processes = []
-HLS_BASE_DIR = "hls"
+def start_ffmpeg_process(cam_id: int):
+    """Starts or restarts a single FFmpeg process for a given camera ID."""
+    if cam_id in ffmpeg_processes and ffmpeg_processes[cam_id].poll() is None:
+        logging.warning(f"Terminating existing process for Camera {cam_id} before restart.")
+        ffmpeg_processes[cam_id].kill()
+        ffmpeg_processes[cam_id].wait()
+
+    # --- THE FIX IS HERE: Clean the specific camera's HLS directory before starting ---
+    cam_hls_dir = f"{HLS_BASE_DIR}/cam{cam_id}"
+    if os.path.exists(cam_hls_dir):
+        shutil.rmtree(cam_hls_dir)
+    os.makedirs(cam_hls_dir)
+    # --- END OF FIX ---
+
+    rtsp_url = (
+        f"rtsp://{settings.CAM_USER}:{settings.CAM_PASS}@"
+        f"{settings.CAM_IP}:{settings.CAM_PORT}/cam/realmonitor?channel={cam_id}&subtype=1"
+    )
+    hls_playlist_path = f"{cam_hls_dir}/stream.m3u8"
+    
+    command = [
+        'ffmpeg', '-rtsp_transport', 'tcp', '-timeout', '15000000', '-i', rtsp_url,
+        '-c:v', 'copy', '-hls_time', '2', '-hls_list_size', '3', 
+        '-hls_flags', 'delete_segments', '-start_number', '1', hls_playlist_path
+    ]
+    
+    logging.info(f"Starting stream for Camera {cam_id}...")
+    process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    ffmpeg_processes[cam_id] = process
+    return process
+
+def monitor_ffmpeg_processes():
+    """Monitors and restarts failed or stale FFmpeg processes."""
+    while True:
+        time.sleep(15)
+        # (This function no longer needs logging, it's too noisy for a health check)
+        for cam_id in range(1, settings.TOTAL_CAMERAS + 1):
+            process = ffmpeg_processes.get(cam_id)
+            playlist_path = f"{HLS_BASE_DIR}/cam{cam_id}/stream.m3u8"
+            
+            is_stale = False
+            if os.path.exists(playlist_path):
+                mtime = os.path.getmtime(playlist_path)
+                if (time.time() - mtime) > STALE_THRESHOLD_SECONDS:
+                    is_stale = True
+            
+            if (process and process.poll() is not None) or is_stale:
+                if is_stale:
+                    logging.warning(f"Supervisor: Stream for Camera {cam_id} is STALE. Restarting...")
+                else:
+                    logging.warning(f"Supervisor: FFmpeg process for Camera {cam_id} died. Restarting...")
+                start_ffmpeg_process(cam_id)
 
 @app.on_event("startup")
 def startup_event():
-    """This code runs when the server starts."""
     check_ffmpeg()
-    
-    if os.path.exists(HLS_BASE_DIR):
-        shutil.rmtree(HLS_BASE_DIR)
-    logging.info(f"Creating HLS directories for {settings.TOTAL_CAMERAS} cameras...")
+    app.mount("/hls", StaticFiles(directory=HLS_BASE_DIR), name="hls")
     for i in range(1, settings.TOTAL_CAMERAS + 1):
-        os.makedirs(f"{HLS_BASE_DIR}/cam{i}", exist_ok=True)
-
-    logging.info("Starting FFmpeg processes...")
-    for i in range(1, settings.TOTAL_CAMERAS + 1):
-        rtsp_url = (
-            f"rtsp://{settings.CAM_USER}:{settings.CAM_PASS}@"
-            f"{settings.CAM_IP}:{settings.CAM_PORT}/cam/realmonitor?channel={i}&subtype=1"
-        )
-        hls_playlist_path = f"{HLS_BASE_DIR}/cam{i}/stream.m3u8"
-        command = [
-            'ffmpeg', '-rtsp_transport', 'tcp', '-i', rtsp_url, '-c:v', 'copy', 
-            '-hls_time', '2', '-hls_list_size', '3', '-hls_flags', 'delete_segments',
-            '-start_number', '1', hls_playlist_path
-        ]
-        process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        ffmpeg_processes.append((i, process))
+        start_ffmpeg_process(i)
     
-    logging.info("Waiting 5 seconds to check initial stream status...")
-    time.sleep(5)
-    # (Checking logic remains the same as before)
+    monitor_thread = threading.Thread(target=monitor_ffmpeg_processes, daemon=True)
+    monitor_thread.start()
+    logging.info("Started background supervisor for FFmpeg processes.")
 
-# --- THE FIX IS HERE: A custom route to serve HLS files with no-cache headers ---
-@app.get("/hls/{cam_id}/{filename}")
-async def get_hls_file(cam_id: str, filename: str):
-    file_path = os.path.join(HLS_BASE_DIR, cam_id, filename)
-    if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # For playlist files, add headers to prevent caching.
-    if filename.endswith(".m3u8"):
-        headers = {
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        }
-        return FileResponse(file_path, headers=headers)
-    
-    # For video segment files (.ts), let the browser cache them normally.
-    return FileResponse(file_path)
-
-# Serve the main HTML file
+# --- Routes (remain the same) ---
 @app.get("/", response_class=HTMLResponse)
 async def get_frontend():
     with open("index.html") as f:
         return HTMLResponse(content=f.read(), status_code=200)
 
-# Add a health check endpoint
 @app.get("/health", response_class=JSONResponse)
 async def health_check():
-    return {"status": "ok"}
+    active_streams = [cid for cid, p in ffmpeg_processes.items() if p.poll() is None]
+    return {"status": "ok", "total_streams": settings.TOTAL_CAMERAS, "active_streams": len(active_streams)}
