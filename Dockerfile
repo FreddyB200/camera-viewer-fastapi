@@ -1,6 +1,10 @@
 # Use an official, lightweight Python image as a base
 FROM python:3.11-slim
 
+# --- FIX: Install FFmpeg using Linux package manager ---
+# This line updates the package list and installs ffmpeg inside the container
+RUN apt-get update && apt-get install -y ffmpeg
+
 # Set the working directory inside the container
 WORKDIR /app
 
